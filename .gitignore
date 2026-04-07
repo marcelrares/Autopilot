@@ -8,6 +8,7 @@ __pycache__/
 venv/
 .venv/
 env/
+venv-*/
 
 # Tooling caches
 .pytest_cache/
@@ -18,7 +19,8 @@ htmlcov/
 
 # IDE / OS files
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 Thumbs.db
 .DS_Store
 
@@ -34,4 +36,3 @@ output.json
 *.mp4
 *.avi
 *.mov
-

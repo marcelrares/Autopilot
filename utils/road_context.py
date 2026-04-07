@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from dataclasses import replace
 
 from config import (
     CAMERA_HEIGHT_M,
@@ -24,6 +25,7 @@ from config import (
     ROAD_CONTEXT_TTC_MAX_S,
     VEHICLE_CLASSES,
 )
+from models import RoadContext, TrackedObject
 
 
 def _fit_lane_models(lanes):
@@ -340,54 +342,54 @@ def build_road_context(lanes, frame_shape, previous_horizon_y=None):
         frame_w,
     )
 
-    return {
-        "lane_visibility_low": not ("left" in models and "right" in models),
-        "has_left_lane": "left" in models,
-        "has_right_lane": "right" in models,
-        "lane_line_count": len(lanes or []),
-        "top_y": top_y,
-        "bottom_y": bottom_y,
-        "frame_width": frame_w,
-        "frame_height": frame_h,
-        "horizon_y": horizon_y,
-        "lane_center_top_x": lane_center_top,
-        "lane_center_bottom_x": lane_center_bottom,
-        "lane_width_top_px": lane_width_top,
-        "lane_width_bottom_px": lane_width_bottom,
-        "lane_models": models,
-        "road_heading_norm": road_heading_norm,
-        "ego_lane_center_norm": float((lane_center_bottom - frame_center_x) / max(1.0, frame_center_x)),
-        "ego_lane_width_norm": float(lane_width_bottom / max(1.0, frame_center_x)),
-        "lane_width_m": ROAD_CONTEXT_REAL_LANE_WIDTH_M,
-        "top_distance_m": top_distance_m,
-        "bottom_distance_m": bottom_distance_m,
-        "road_centerline_profile": road_centerline_profile,
-        "homography_image_to_ground": homography_image_to_ground,
-    }
+    return RoadContext(
+        lane_visibility_low=not ("left" in models and "right" in models),
+        has_left_lane="left" in models,
+        has_right_lane="right" in models,
+        lane_line_count=len(lanes or []),
+        top_y=top_y,
+        bottom_y=bottom_y,
+        frame_width=frame_w,
+        frame_height=frame_h,
+        horizon_y=horizon_y,
+        lane_center_top_x=lane_center_top,
+        lane_center_bottom_x=lane_center_bottom,
+        lane_width_top_px=lane_width_top,
+        lane_width_bottom_px=lane_width_bottom,
+        lane_models=models,
+        road_heading_norm=road_heading_norm,
+        ego_lane_center_norm=float((lane_center_bottom - frame_center_x) / max(1.0, frame_center_x)),
+        ego_lane_width_norm=float(lane_width_bottom / max(1.0, frame_center_x)),
+        lane_width_m=ROAD_CONTEXT_REAL_LANE_WIDTH_M,
+        top_distance_m=top_distance_m,
+        bottom_distance_m=bottom_distance_m,
+        road_centerline_profile=road_centerline_profile,
+        homography_image_to_ground=homography_image_to_ground,
+    )
 
 
 def project_image_point_to_ground(road_context, point_xy):
-    homography = road_context.get("homography_image_to_ground")
+    homography = road_context.homography_image_to_ground
     if homography is None:
         return None
     return _project_point_with_homography(homography, point_xy)
 
 
 def centerline_lateral_shift_at_distance(road_context, distance_m):
-    return _interpolate_centerline_shift(road_context.get("road_centerline_profile", []), distance_m)
+    return _interpolate_centerline_shift(road_context.road_centerline_profile, distance_m)
 
 
 def lane_bounds_at_y(road_context, y):
     return _lane_geometry_at_y(
-        road_context.get("lane_models", {}),
+        road_context.lane_models,
         float(y),
-        road_context["top_y"],
-        road_context["bottom_y"],
-        road_context["lane_center_top_x"],
-        road_context["lane_center_bottom_x"],
-        road_context["lane_width_top_px"],
-        road_context["lane_width_bottom_px"],
-        road_context["frame_width"],
+        road_context.top_y,
+        road_context.bottom_y,
+        road_context.lane_center_top_x,
+        road_context.lane_center_bottom_x,
+        road_context.lane_width_top_px,
+        road_context.lane_width_bottom_px,
+        road_context.frame_width,
     )
 
 
@@ -433,14 +435,14 @@ class RoadContextEstimator:
         return smoothed_profile
 
     def _estimate_metric_components(self, obj, road_context, lane_bounds):
-        x1, _, x2, y2 = obj["bbox"]
+        x1, _, x2, y2 = obj.bbox
         foot_x = (x1 + x2) / 2.0
-        foot_y = float(np.clip(y2, road_context["top_y"], road_context["bottom_y"]))
-        size_distance_m = float(obj.get("distance", 9999.0))
+        foot_y = float(np.clip(y2, road_context.top_y, road_context.bottom_y))
+        size_distance_m = float(obj.distance)
 
         horizon_distance_m = None
-        if foot_y > road_context["horizon_y"] + 1.0:
-            horizon_distance_m = _safe_forward_distance_from_horizon(foot_y, road_context["horizon_y"])
+        if foot_y > road_context.horizon_y + 1.0:
+            horizon_distance_m = _safe_forward_distance_from_horizon(foot_y, road_context.horizon_y)
 
         lane_scale_distance_m = None
         lane_width_px = lane_bounds["lane_width_px"]
@@ -459,7 +461,7 @@ class RoadContextEstimator:
             if raw_lateral_distance_m is not None else None
         )
 
-        obj_class = obj.get("class", "object")
+        obj_class = obj.label
         if obj_class in VEHICLE_CLASSES or obj_class in PERSON_CLASSES:
             estimates = [
                 (projected_distance_m, 0.48),
@@ -565,35 +567,35 @@ class RoadContextEstimator:
 
     def annotate(self, objects, lanes, frame_shape, visibility_context=None):
         road_context = build_road_context(lanes, frame_shape, previous_horizon_y=self.prev_horizon_y)
-        road_context["road_centerline_profile"] = self._smooth_centerline_profile(
-            road_context.get("road_centerline_profile", [])
+        road_context.road_centerline_profile = self._smooth_centerline_profile(
+            road_context.road_centerline_profile
         )
         visibility_context = visibility_context or {}
         visibility_condition = visibility_context.get("condition", "day")
-        road_context["visibility_condition"] = visibility_condition
-        road_context["visibility_score"] = float(visibility_context.get("visibility_score", 0.0) or 0.0)
-        road_context["visibility_low"] = bool(visibility_context.get("low_visibility", False))
-        road_context["scene_brightness"] = float(visibility_context.get("brightness", 0.5) or 0.5)
-        road_context["scene_contrast"] = float(visibility_context.get("contrast", 0.5) or 0.5)
-        road_context["scene_fog_score"] = float(visibility_context.get("fog_score", 0.0) or 0.0)
-        road_context["scene_low_light_score"] = float(visibility_context.get("low_light_score", 0.0) or 0.0)
-        if road_context["visibility_low"] and road_context.get("lane_line_count", 0) < 5:
-            road_context["lane_visibility_low"] = True
+        road_context.visibility_condition = visibility_condition
+        road_context.visibility_score = float(visibility_context.get("visibility_score", 0.0) or 0.0)
+        road_context.visibility_low = bool(visibility_context.get("low_visibility", False))
+        road_context.scene_brightness = float(visibility_context.get("brightness", 0.5) or 0.5)
+        road_context.scene_contrast = float(visibility_context.get("contrast", 0.5) or 0.5)
+        road_context.scene_fog_score = float(visibility_context.get("fog_score", 0.0) or 0.0)
+        road_context.scene_low_light_score = float(visibility_context.get("low_light_score", 0.0) or 0.0)
+        if road_context.visibility_low and road_context.lane_line_count < 5:
+            road_context.lane_visibility_low = True
         distance_smoothing_alpha = (
             ROAD_CONTEXT_DISTANCE_SMOOTHING_ALPHA * 0.65
-            if road_context["visibility_low"] else ROAD_CONTEXT_DISTANCE_SMOOTHING_ALPHA
+            if road_context.visibility_low else ROAD_CONTEXT_DISTANCE_SMOOTHING_ALPHA
         )
-        self.prev_horizon_y = road_context["horizon_y"]
+        self.prev_horizon_y = road_context.horizon_y
         annotated_objects = []
         active_track_ids = set()
 
         for obj in objects:
-            annotated = dict(obj)
-            track_id = annotated["id"]
+            annotated = replace(obj)
+            track_id = annotated.id
             active_track_ids.add(track_id)
 
-            x1, _, x2, y2 = annotated["bbox"]
-            y_ref = int(np.clip(y2, road_context["top_y"], road_context["bottom_y"]))
+            x1, _, x2, y2 = annotated.bbox
+            y_ref = int(np.clip(y2, road_context.top_y, road_context.bottom_y))
             lane_bounds = lane_bounds_at_y(road_context, y_ref)
 
             bbox_center_x = (x1 + x2) / 2.0
@@ -620,28 +622,28 @@ class RoadContextEstimator:
             relative_speed_mps, ttc_s = self._update_longitudinal_kinematics(
                 track_id,
                 fused_distance_m,
-                visibility_low=road_context["visibility_low"],
+                visibility_low=road_context.visibility_low,
             )
 
-            annotated["lane_relation"] = lane_relation
-            annotated["lane_index"] = lane_index
-            annotated["lane_offset"] = float(lane_offset)
-            annotated["lane_overlap"] = float(lane_overlap)
-            annotated["path_conflict"] = bool(
+            annotated.lane_relation = lane_relation
+            annotated.lane_index = lane_index
+            annotated.lane_offset = float(lane_offset)
+            annotated.lane_overlap = float(lane_overlap)
+            annotated.path_conflict = bool(
                 lane_overlap >= 0.15
                 or lane_index == 0
                 or (metric["lateral_distance_m"] is not None and abs(metric["lateral_distance_m"]) <= ROAD_CONTEXT_REAL_LANE_WIDTH_M * 0.70)
             )
-            annotated["distance_size_m"] = round(metric["distance_size_m"], 3)
-            annotated["distance_metric_m"] = None if metric["distance_metric_m"] is None else round(metric["distance_metric_m"], 3)
-            annotated["distance_horizon_m"] = None if metric["distance_horizon_m"] is None else round(metric["distance_horizon_m"], 3)
-            annotated["distance_lane_scale_m"] = None if metric["distance_lane_scale_m"] is None else round(metric["distance_lane_scale_m"], 3)
-            annotated["lateral_distance_m"] = None if metric["lateral_distance_m"] is None else round(metric["lateral_distance_m"], 3)
-            annotated["lateral_distance_raw_m"] = None if metric["lateral_distance_raw_m"] is None else round(metric["lateral_distance_raw_m"], 3)
-            annotated["road_center_shift_m"] = round(metric["road_center_shift_m"], 3)
-            annotated["relative_speed_mps"] = None if relative_speed_mps is None else round(relative_speed_mps, 3)
-            annotated["ttc_s"] = None if ttc_s is None else round(ttc_s, 3)
-            annotated["distance"] = float(round(fused_distance_m, 3))
+            annotated.distance_size_m = round(metric["distance_size_m"], 3)
+            annotated.distance_metric_m = None if metric["distance_metric_m"] is None else round(metric["distance_metric_m"], 3)
+            annotated.distance_horizon_m = None if metric["distance_horizon_m"] is None else round(metric["distance_horizon_m"], 3)
+            annotated.distance_lane_scale_m = None if metric["distance_lane_scale_m"] is None else round(metric["distance_lane_scale_m"], 3)
+            annotated.lateral_distance_m = None if metric["lateral_distance_m"] is None else round(metric["lateral_distance_m"], 3)
+            annotated.lateral_distance_raw_m = None if metric["lateral_distance_raw_m"] is None else round(metric["lateral_distance_raw_m"], 3)
+            annotated.road_center_shift_m = round(metric["road_center_shift_m"], 3)
+            annotated.relative_speed_mps = None if relative_speed_mps is None else round(relative_speed_mps, 3)
+            annotated.ttc_s = None if ttc_s is None else round(ttc_s, 3)
+            annotated.distance = float(round(fused_distance_m, 3))
             annotated_objects.append(annotated)
 
         stale_track_ids = set(self.prev_metric_distances) - active_track_ids

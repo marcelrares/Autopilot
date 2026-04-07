@@ -291,22 +291,22 @@ class BirdViewRenderer:
         )
 
     def _object_target_state(self, obj, layout):
-        distance = float(obj.get("distance", BIRDVIEW_MAX_DISTANCE))
+        distance = float(obj.distance)
         progress = np.clip(distance / BIRDVIEW_MAX_DISTANCE, 0.0, 1.0)
-        obj_class = obj["class"]
-        lane_offset = float(obj.get("lane_offset", 0.0))
-        lane_relation = obj.get("lane_relation", "ego_lane")
-        lateral_distance_m = obj.get("lateral_distance_m")
+        obj_label = obj.label
+        lane_offset = float(obj.lane_offset if obj.lane_offset is not None else 0.0)
+        lane_relation = obj.lane_relation or "ego_lane"
+        lateral_distance_m = obj.lateral_distance_m
         ego_lane_center_x = self._lane_center_x(1, layout, progress)
 
-        if obj_class in {"traffic light", "stop sign"}:
+        if obj_label in {"traffic light", "stop sign"}:
             roadside_side = -1 if lane_relation in {"left_adjacent", "far_left"} or lane_offset < -0.1 else 1
             if lateral_distance_m is not None:
                 roadside_side = -1 if lateral_distance_m < 0.0 else 1
             x = self._roadside_x(roadside_side, progress, layout)
             y = int(layout["road_bottom"] - progress * (layout["road_bottom"] - layout["road_top"]))
 
-            if obj_class == "traffic light":
+            if obj_label == "traffic light":
                 width = 24
                 height = 58
             else:
@@ -320,12 +320,12 @@ class BirdViewRenderer:
                 "h": float(height),
                 "distance": distance,
                 "lane_index": 0,
-                "class": obj_class,
-                "render_shape": obj_class.replace(" ", "_"),
-                "traffic_light_color": obj.get("traffic_light_color", "unknown"),
+                "label": obj_label,
+                "render_shape": obj_label.replace(" ", "_"),
+                "traffic_light_color": obj.traffic_light_color or "unknown",
             }
 
-        lane_index = int(np.clip(obj.get("lane_index", 0), -1, 1))
+        lane_index = int(np.clip(obj.lane_index if obj.lane_index is not None else 0, -1, 1))
         if lateral_distance_m is not None:
             lateral_distance_m = float(np.clip(lateral_distance_m, -ROAD_CONTEXT_REAL_LANE_WIDTH_M * 1.45, ROAD_CONTEXT_REAL_LANE_WIDTH_M * 1.45))
             x = ego_lane_center_x + int((lateral_distance_m / ROAD_CONTEXT_REAL_LANE_WIDTH_M) * layout["lane_width"])
@@ -337,7 +337,7 @@ class BirdViewRenderer:
         y = int(layout["road_bottom"] - progress * (layout["road_bottom"] - layout["road_top"]))
 
         scale = 1.0 - (0.42 * progress)
-        if obj["class"] in VEHICLE_CLASSES:
+        if obj.label in VEHICLE_CLASSES:
             width = max(18, int(32 * scale))
             height = max(30, int(56 * scale))
         else:
@@ -351,37 +351,37 @@ class BirdViewRenderer:
             "h": float(height),
             "distance": distance,
             "lane_index": lane_index,
-            "class": obj_class,
+            "label": obj_label,
             "render_shape": "box",
-            "traffic_light_color": obj.get("traffic_light_color"),
+            "traffic_light_color": obj.traffic_light_color,
         }
 
     def _update_object_states(self, objects, layout):
         active_ids = set()
         drawables = []
 
-        for obj in sorted(objects, key=lambda item: item.get("distance", 9999), reverse=True):
-            distance = float(obj.get("distance", BIRDVIEW_MAX_DISTANCE))
+        for obj in sorted(objects, key=lambda item: item.distance, reverse=True):
+            distance = float(obj.distance)
             if distance > BIRDVIEW_MAX_DISTANCE:
                 continue
 
-            object_id = str(obj.get("id", len(active_ids)))
+            object_id = str(obj.id)
             active_ids.add(object_id)
             target_state = self._object_target_state(obj, layout)
             previous_state = self.object_states.get(object_id)
 
-            if previous_state is not None and previous_state.get("class") == target_state["class"]:
+            if previous_state is not None and previous_state.get("label") == target_state["label"]:
                 alpha = BIRDVIEW_OBJECT_SMOOTHING_ALPHA
                 for key in ("x", "y", "w", "h", "distance"):
                     target_state[key] = self._blend(previous_state[key], target_state[key], alpha)
 
-            target_state["class"] = obj["class"]
+            target_state["label"] = obj.label
             target_state["missed"] = 0
             self.object_states[object_id] = target_state
 
             drawables.append({
                 "id": object_id,
-                "class": target_state["class"],
+                "label": target_state["label"],
                 "distance": target_state["distance"],
                 "lane_index": target_state["lane_index"],
                 "x": int(target_state["x"]),
@@ -448,6 +448,9 @@ class BirdViewRenderer:
         cv2.line(canvas, (x, y + radius), (x, y + radius + 15), (160, 160, 160), 2)
 
     def _draw_objects(self, canvas, drawables):
+        overlay = None
+        solid_boxes = []
+
         for obj in drawables:
             x = obj["x"]
             y = obj["y"]
@@ -485,22 +488,25 @@ class BirdViewRenderer:
 
             top_left = (x - box_w // 2, y - box_h // 2)
             bottom_right = (x + box_w // 2, y + box_h // 2)
-
-            overlay = canvas.copy()
+            if overlay is None:
+                overlay = canvas.copy()
             cv2.rectangle(overlay, top_left, bottom_right, color, -1)
-            cv2.addWeighted(overlay, 0.24, canvas, 0.76, 0, canvas)
-            cv2.rectangle(canvas, top_left, bottom_right, color, 2)
-            cv2.rectangle(canvas, top_left, bottom_right, (245, 248, 250), 1)
+            solid_boxes.append((top_left, bottom_right, color, f"{obj['label']} {obj['distance']:.1f}m"))
 
-            cv2.putText(
-                canvas,
-                f"{obj['class']} {obj['distance']:.1f}m",
-                (top_left[0] - 4, top_left[1] - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.42,
-                color,
-                1,
-            )
+        if overlay is not None:
+            cv2.addWeighted(overlay, 0.24, canvas, 0.76, 0, canvas)
+            for top_left, bottom_right, color, label in solid_boxes:
+                cv2.rectangle(canvas, top_left, bottom_right, color, 2)
+                cv2.rectangle(canvas, top_left, bottom_right, (245, 248, 250), 1)
+                cv2.putText(
+                    canvas,
+                    label,
+                    (top_left[0] - 4, top_left[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    color,
+                    1,
+                )
 
     def _draw_ego(self, canvas, layout):
         ego_center_x = self._lane_center_x(1, layout)
@@ -725,7 +731,7 @@ class BirdViewRenderer:
     def _draw_dashboard_panel(self, canvas, decision, objects, road_context, layout):
         panel_left = layout["panel_left"] + 18
         panel_width = BIRDVIEW_PANEL_WIDTH - 36
-        nearest_distance = min((obj.get("distance", BIRDVIEW_MAX_DISTANCE) for obj in objects), default=BIRDVIEW_MAX_DISTANCE)
+        nearest_distance = min((obj.distance for obj in objects), default=BIRDVIEW_MAX_DISTANCE)
         focus_id = decision.get("focus_object_id")
         focus_lane = decision.get("focus_lane_relation")
         focus_distance = decision.get("focus_distance_m")

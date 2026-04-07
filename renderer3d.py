@@ -40,13 +40,13 @@ def run_3d(get_decision):
 
         # culoare în funcție de frână
         color = (0,1,0)
-        if decision["brake"] == "soft":
+        if decision.brake == "soft":
             color = (1,1,0)
-        if decision["brake"] == "hard":
+        if decision.brake == "hard":
             color = (1,0,0)
 
         # logică mișcare
-        if decision["brake"] == "none":
+        if decision.brake == "none":
             car_speed += 0.01
         else:
             car_speed *= 0.9

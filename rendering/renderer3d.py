@@ -153,12 +153,12 @@ class Scene3DRenderer:
     def _label_lines_for(target_state):
         if not target_state.get("focused"):
             return None, None
-        obj_class = str(target_state["class"]).replace("_", " ")
-        primary_text = f"{obj_class.title()} {target_state['distance']:.1f}m"
+        obj_label = str(target_state["label"]).replace("_", " ")
+        primary_text = f"{obj_label.title()} {target_state['distance']:.1f}m"
         ttc_s = target_state.get("ttc_s")
         relative_speed_mps = target_state.get("relative_speed_mps")
         signal_state = target_state.get("traffic_light_color", "unknown")
-        if target_state["class"] == "traffic light":
+        if target_state["label"] == "traffic light":
             secondary_text = f"Signal {signal_state}"
         elif ttc_s is not None:
             secondary_text = f"TTC {ttc_s:.1f}s"
@@ -169,11 +169,11 @@ class Scene3DRenderer:
         return primary_text, secondary_text
 
     def _target_state(self, obj):
-        lane_index = int(np.clip(obj.get("lane_index", 0), -2, 2))
-        distance = float(np.clip(obj.get("distance", RENDER3D_MAX_DISTANCE), 0.0, RENDER3D_MAX_DISTANCE))
-        lane_offset = float(np.clip(obj.get("lane_offset", 0.0) - lane_index, -0.80, 0.80))
-        lateral_distance_m = obj.get("lateral_distance_m")
-        obj_class = obj["class"]
+        lane_index = int(np.clip(obj.lane_index if obj.lane_index is not None else 0, -2, 2))
+        distance = float(np.clip(obj.distance, 0.0, RENDER3D_MAX_DISTANCE))
+        lane_offset = float(np.clip((obj.lane_offset if obj.lane_offset is not None else 0.0) - lane_index, -0.80, 0.80))
+        lateral_distance_m = obj.lateral_distance_m
+        obj_label = obj.label
 
         curve_shift = self.road_shift_for_distance(distance)
         if lateral_distance_m is not None:
@@ -183,43 +183,43 @@ class Scene3DRenderer:
             x = self._lane_center_x(lane_index) + (lane_offset * RENDER3D_LANE_WIDTH * 0.52) + curve_shift
         z = RENDER3D_EGO_Z - distance
         render_shape = "generic"
-        traffic_light_color = obj.get("traffic_light_color", "unknown")
+        traffic_light_color = obj.traffic_light_color or "unknown"
 
-        if obj_class == "traffic light":
+        if obj_label == "traffic light":
             road_left, road_right = self._road_bounds()
-            side = -1 if obj.get("lane_relation") in {"left_adjacent", "far_left"} or obj.get("lane_offset", 0.0) < -0.15 else 1
+            side = -1 if obj.lane_relation in {"left_adjacent", "far_left"} or (obj.lane_offset if obj.lane_offset is not None else 0.0) < -0.15 else 1
             x = ((road_left - 1.35) if side < 0 else (road_right + 1.35)) + curve_shift
             width, height, length = 0.70, 4.90, 0.58
             render_shape = "traffic_light"
             label_anchor_y = 5.3
-        elif obj_class == "stop sign":
+        elif obj_label == "stop sign":
             road_left, road_right = self._road_bounds()
-            side = -1 if obj.get("lane_relation") in {"left_adjacent", "far_left"} or obj.get("lane_offset", 0.0) < -0.15 else 1
+            side = -1 if obj.lane_relation in {"left_adjacent", "far_left"} or (obj.lane_offset if obj.lane_offset is not None else 0.0) < -0.15 else 1
             x = ((road_left - 1.0) if side < 0 else (road_right + 1.0)) + curve_shift
             width, height, length = 0.52, 3.35, 0.34
             render_shape = "stop_sign"
             label_anchor_y = 3.7
-        elif obj_class == "truck":
-            width, height, length = _vehicle_dimensions(obj_class)
+        elif obj_label == "truck":
+            width, height, length = _vehicle_dimensions(obj_label)
             render_shape = "truck"
             label_anchor_y = height + 0.9
-        elif obj_class == "bus":
-            width, height, length = _vehicle_dimensions(obj_class)
+        elif obj_label == "bus":
+            width, height, length = _vehicle_dimensions(obj_label)
             render_shape = "bus"
             label_anchor_y = height + 0.85
-        elif obj_class == "car":
-            width, height, length = _vehicle_dimensions(obj_class)
+        elif obj_label == "car":
+            width, height, length = _vehicle_dimensions(obj_label)
             render_shape = "car"
             label_anchor_y = height + 0.8
-        elif obj_class == "motorcycle":
-            width, height, length = _vehicle_dimensions(obj_class)
+        elif obj_label == "motorcycle":
+            width, height, length = _vehicle_dimensions(obj_label)
             render_shape = "motorcycle"
             label_anchor_y = height + 0.7
-        elif obj_class == "person":
+        elif obj_label == "person":
             width, height, length = 0.72, 1.78, 0.72
             render_shape = "person"
             label_anchor_y = height + 0.7
-        elif obj_class == "bicycle":
+        elif obj_label == "bicycle":
             width, height, length = 0.86, 1.35, 1.75
             render_shape = "bicycle"
             label_anchor_y = height + 0.7
@@ -238,13 +238,13 @@ class Scene3DRenderer:
             "height": float(height),
             "length": float(length),
             "label_anchor_y": float(label_anchor_y),
-            "class": obj_class,
-            "lane_relation": obj.get("lane_relation"),
-            "id": str(obj.get("id")),
+            "label": obj_label,
+            "lane_relation": obj.lane_relation,
+            "id": str(obj.id),
             "render_shape": render_shape,
             "traffic_light_color": traffic_light_color,
-            "ttc_s": obj.get("ttc_s"),
-            "relative_speed_mps": obj.get("relative_speed_mps"),
+            "ttc_s": obj.ttc_s,
+            "relative_speed_mps": obj.relative_speed_mps,
         }
 
     def build_scene_objects(self, objects, road_context, decision):
@@ -255,13 +255,13 @@ class Scene3DRenderer:
         focus_id = None if decision is None else str(decision.get("focus_object_id"))
         brake_pct = 0 if decision is None else int(decision.get("brake_pct", 0))
 
-        for obj in sorted(objects, key=lambda item: item.get("distance", 9999), reverse=True):
+        for obj in sorted(objects, key=lambda item: item.distance, reverse=True):
             target_state = self._target_state(obj)
             object_id = target_state["id"]
             active_ids.add(object_id)
 
             previous_state = self.object_states.get(object_id)
-            if previous_state is not None and previous_state.get("class") == target_state["class"]:
+            if previous_state is not None and previous_state.get("label") == target_state["label"]:
                 alpha = RENDER3D_OBJECT_SMOOTHING_ALPHA
                 for key in ("x", "z", "distance", "width", "height", "length", "label_anchor_y"):
                     target_state[key] = self._blend(previous_state[key], target_state[key], alpha)
@@ -278,7 +278,7 @@ class Scene3DRenderer:
             relative_speed_mps = target_state.get("relative_speed_mps")
             ttc_s = target_state.get("ttc_s")
             brake_intensity = 0.0
-            if target_state["class"] in VEHICLE_CLASSES and target_state["lane_index"] == 0:
+            if target_state["label"] in VEHICLE_CLASSES and target_state["lane_index"] == 0:
                 if ttc_s is not None:
                     brake_intensity = max(brake_intensity, _clamp((4.2 - float(ttc_s)) / 2.6, 0.0, 1.0))
                 if relative_speed_mps is not None and float(relative_speed_mps) > 0.8:
@@ -1158,6 +1158,7 @@ def run_3d(get_scene):
     _setup_gl(*display)
     renderer = Scene3DRenderer()
     clock = pygame.time.Clock()
+    last_scene_version = None
 
     while True:
         for event in pygame.event.get():
@@ -1166,6 +1167,11 @@ def run_3d(get_scene):
                 return
 
         scene_snapshot = get_scene() or {}
+        scene_version = scene_snapshot.get("version")
+        if scene_version == last_scene_version:
+            clock.tick(15)
+            continue
+
         renderer.update_caption(scene_snapshot)
         scene_objects = renderer.build_scene_objects(
             scene_snapshot.get("objects", []),
@@ -1177,4 +1183,5 @@ def run_3d(get_scene):
         _draw_scene(scene_objects, draw_snapshot)
 
         pygame.display.flip()
+        last_scene_version = scene_version
         clock.tick(60)

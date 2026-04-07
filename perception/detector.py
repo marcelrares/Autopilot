@@ -1,10 +1,13 @@
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO
 
 from config import (
     DETECTION_CONFIDENCE,
     MODEL_PATH,
+    PERF_DETECTOR_CLASSES,
+    PERF_DETECTOR_IMGSZ,
     TRAFFIC_LIGHT_MIN_ACTIVE_PIXELS,
     TRAFFIC_LIGHT_MIN_BOX_SIZE,
     TRAFFIC_LIGHT_MIN_SATURATION,
@@ -12,12 +15,38 @@ from config import (
     TRAFFIC_LIGHT_SCORE_MARGIN,
     VEHICLE_CLASSES,
 )
+from models import Detection
 from utils.visibility import preprocess_frame_for_detection, preprocess_traffic_light_roi
 
 
 class ObjectDetector:
     def __init__(self):
         self.model = YOLO(MODEL_PATH)
+        self.device_name = "0" if torch.cuda.is_available() else "cpu"
+        self.use_half = bool(torch.cuda.is_available())
+        self.inference_imgsz = int(PERF_DETECTOR_IMGSZ)
+        self.classes = list(PERF_DETECTOR_CLASSES)
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except AttributeError:
+                pass
+            self._warmup()
+
+    def _warmup(self):
+        dummy_frame = np.zeros((self.inference_imgsz, self.inference_imgsz, 3), dtype=np.uint8)
+        _ = self.model.predict(
+            source=dummy_frame,
+            verbose=False,
+            device=self.device_name,
+            half=self.use_half,
+            imgsz=self.inference_imgsz,
+            classes=self.classes,
+            conf=DETECTION_CONFIDENCE,
+        )
+        torch.cuda.synchronize()
 
     @staticmethod
     def classify_traffic_light_color(frame, bbox, visibility_context=None):
@@ -99,10 +128,17 @@ class ObjectDetector:
         visibility_context = visibility_context or {}
         inference_frame = preprocess_frame_for_detection(frame, visibility_context)
         confidence_threshold = float(visibility_context.get("detection_confidence", DETECTION_CONFIDENCE))
-        results = self.model(inference_frame, verbose=False)
+        results = self.model.predict(
+            source=inference_frame,
+            verbose=False,
+            device=self.device_name,
+            half=self.use_half,
+            imgsz=self.inference_imgsz,
+            classes=self.classes,
+            conf=confidence_threshold,
+        )
 
         detections = []
-        segmented_objects = []
 
         for result in results:
             boxes = result.boxes
@@ -116,9 +152,6 @@ class ObjectDetector:
                 conf = float(box.conf[0])
                 class_name = self.model.names[cls]
 
-                if conf < confidence_threshold:
-                    continue
-
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 traffic_light_color = None
                 if class_name == "traffic light":
@@ -128,24 +161,20 @@ class ObjectDetector:
                         visibility_context=visibility_context,
                     )
 
-                detections.append((
-                    [x1, y1, x2 - x1, y2 - y1],
-                    conf,
-                    class_name
-                ))
-
                 polygon = None
                 if masks is not None and class_name in VEHICLE_CLASSES:
                     pts = masks.xy[i]
                     if pts is not None and len(pts) >= 3:
                         polygon = np.array(pts, dtype=np.int32)
 
-                segmented_objects.append({
-                    "bbox": [x1, y1, x2, y2],
-                    "class": class_name,
-                    "confidence": conf,
-                    "polygon": polygon,
-                    "traffic_light_color": traffic_light_color,
-                })
+                detections.append(
+                    Detection(
+                        bbox=(x1, y1, x2, y2),
+                        confidence=conf,
+                        label=class_name,
+                        polygon=polygon,
+                        traffic_light_color=traffic_light_color,
+                    )
+                )
 
-        return detections, segmented_objects
+        return detections

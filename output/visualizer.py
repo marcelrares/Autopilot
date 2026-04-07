@@ -71,34 +71,37 @@ def _draw_stop_sign_symbol(frame, x1, y1, x2, y2):
 
 
 def draw_objects(frame, objects):
+    polygon_overlay = None
+    polygon_draws = []
+    label_draws = []
+
     for obj in objects:
-        x1, y1, x2, y2 = obj["bbox"]
-        obj_class = obj["class"]
-        traffic_light_color = obj.get("traffic_light_color", "unknown")
+        x1, y1, x2, y2 = obj.bbox
+        obj_class = obj.label
+        traffic_light_color = obj.traffic_light_color or "unknown"
 
         color = (0, 255, 0)
-        if obj["distance"] < 15:
+        if obj.distance < 15:
             color = (0, 165, 255)
-        if obj["distance"] < 10:
+        if obj.distance < 10:
             color = (0, 0, 255)
 
-        label = f"{obj_class} ID:{obj['id']} {int(obj['distance'])}m"
+        label = f"{obj_class} ID:{obj.id} {int(obj.distance)}m"
         if obj_class == "traffic light":
-            label = f"traffic light {traffic_light_color} {int(obj['distance'])}m"
+            label = f"traffic light {traffic_light_color} {int(obj.distance)}m"
             color = _traffic_light_display_color(traffic_light_color)
         elif obj_class == "stop sign":
-            label = f"stop sign {int(obj['distance'])}m"
+            label = f"stop sign {int(obj.distance)}m"
             color = (0, 0, 255)
-        polygon = obj.get("polygon")
+        polygon = obj.polygon
 
         if obj_class in VEHICLE_CLASSES and polygon is not None and len(polygon) >= 3:
             epsilon = 0.002 * cv2.arcLength(polygon, True)
             smooth_polygon = cv2.approxPolyDP(polygon, epsilon, True)
-
-            overlay = frame.copy()
-            cv2.fillPoly(overlay, [smooth_polygon], color)
-            frame = cv2.addWeighted(overlay, 0.18, frame, 0.82, 0)
-            cv2.polylines(frame, [smooth_polygon], True, color, 3)
+            if polygon_overlay is None:
+                polygon_overlay = frame.copy()
+            cv2.fillPoly(polygon_overlay, [smooth_polygon], color)
+            polygon_draws.append((smooth_polygon, color))
         elif obj_class == "traffic light":
             _draw_traffic_light_symbol(frame, x1, y1, x2, y2, traffic_light_color)
         elif obj_class == "stop sign":
@@ -106,10 +109,18 @@ def draw_objects(frame, objects):
         else:
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
+        label_draws.append((label, (x1, max(25, y1 - 10)), color))
+
+    if polygon_overlay is not None:
+        frame = cv2.addWeighted(polygon_overlay, 0.18, frame, 0.82, 0)
+        for smooth_polygon, color in polygon_draws:
+            cv2.polylines(frame, [smooth_polygon], True, color, 3)
+
+    for label, origin, color in label_draws:
         cv2.putText(
             frame,
             label,
-            (x1, max(25, y1 - 10)),
+            origin,
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             color,
@@ -130,17 +141,17 @@ def draw_lanes(frame, lanes, roi_polygon):
 
 
 def draw_decision_ui(frame, decision):
-    cv2.putText(frame, f"Brake: {decision['brake']}", (20, 30),
+    cv2.putText(frame, f"Brake: {decision.brake}", (20, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    cv2.putText(frame, f"Lane: {decision['lane']}", (20, 60),
+    cv2.putText(frame, f"Lane: {decision.lane}", (20, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-    cv2.putText(frame, f"Speed: {decision['speed']}", (20, 90),
+    cv2.putText(frame, f"Speed: {decision.speed}", (20, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    cv2.putText(frame, f"Risk: {decision['risk']}", (20, 120),
+    cv2.putText(frame, f"Risk: {decision.risk}", (20, 120),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
     y = 160
-    for reason in decision.get("reason", []):
+    for reason in decision.reason:
         cv2.putText(frame, f"- {reason}", (20, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         y += 25

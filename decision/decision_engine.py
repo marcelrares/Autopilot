@@ -46,6 +46,7 @@ from config import (
     PERSON_CLASSES,
     VEHICLE_CLASSES,
 )
+from models import Decision, RoadContext, TrackedObject
 
 
 LONGITUDINAL_PRESETS = {
@@ -235,29 +236,10 @@ class DecisionEngine:
         self.frame_dt = max(1e-3, float(frame_dt))
 
     def _empty_decision(self):
-        return {
-            "longitudinal_mode": "cruise",
-            "brake": "no_brake",
-            "brake_pct": 0,
-            "throttle": "maintain_throttle",
-            "throttle_pct": 62,
-            "lane": "keep_lane",
-            "speed": "maintain_speed",
-            "risk": "low",
-            "reason": [],
-            "action_priority": [],
-            "focus_object_id": None,
-            "focus_lane_relation": None,
-            "focus_distance_m": None,
-            "focus_ttc_s": None,
-            "focus_relative_speed_mps": None,
-            "estimated_speed_kmh": round(self.estimated_speed_kmh, 1),
-            "speed_target_kmh": round(self.estimated_speed_kmh, 1),
-            "traffic_light_state": None,
-            "visibility_condition": "day",
-            "visibility_score": 0.0,
-            "speed_cap_kmh": None,
-        }
+        return Decision(
+            estimated_speed_kmh=round(self.estimated_speed_kmh, 1),
+            speed_target_kmh=round(self.estimated_speed_kmh, 1),
+        )
 
     @staticmethod
     def _closing_speed_value(relative_speed_mps):
@@ -271,10 +253,10 @@ class DecisionEngine:
             self.previous_follow_object_id = None
             return None
 
-        lead_id = str(lead_vehicle.get("id"))
-        distance = float(lead_vehicle.get("distance", 9999.0))
-        ttc_s = lead_vehicle.get("ttc_s")
-        relative_speed_mps = self._closing_speed_value(lead_vehicle.get("relative_speed_mps"))
+        lead_id = str(lead_vehicle.id)
+        distance = float(lead_vehicle.distance)
+        ttc_s = lead_vehicle.ttc_s
+        relative_speed_mps = self._closing_speed_value(lead_vehicle.relative_speed_mps)
         same_lead_object = lead_id == self.previous_follow_object_id
         previous_mode = self.previous_follow_mode if same_lead_object else "cruise"
         previous_mode_order = FOLLOWING_MODE_ORDER.get(previous_mode, 0)
@@ -339,9 +321,9 @@ class DecisionEngine:
         return f"Lead vehicle {mode_text}: gap {distance:.1f}m, stable closing"
 
     def _update_estimated_speed(self, decision):
-        mode = decision["longitudinal_mode"]
+        mode = decision.longitudinal_mode
         target_speed_kmh = float(LONGITUDINAL_TARGET_SPEED_KMH.get(mode, DECISION_SPEED_INITIAL_KMH))
-        speed_cap_kmh = decision.get("speed_cap_kmh")
+        speed_cap_kmh = decision.speed_cap_kmh
         if speed_cap_kmh is not None:
             target_speed_kmh = min(target_speed_kmh, float(speed_cap_kmh))
         current_speed_kmh = float(self.estimated_speed_kmh)
@@ -357,18 +339,18 @@ class DecisionEngine:
 
         updated_speed_kmh = float(max(0.0, min(DECISION_SPEEDOMETER_MAX_KMH, updated_speed_kmh)))
         self.estimated_speed_kmh = updated_speed_kmh
-        decision["estimated_speed_kmh"] = round(updated_speed_kmh, 1)
-        decision["speed_target_kmh"] = round(target_speed_kmh, 1)
+        decision.estimated_speed_kmh = round(updated_speed_kmh, 1)
+        decision.speed_target_kmh = round(target_speed_kmh, 1)
 
     def _apply_visibility_policy(self, decision, road_context):
-        visibility_condition = road_context.get("visibility_condition", "day")
-        visibility_score = float(road_context.get("visibility_score", 0.0) or 0.0)
-        lane_visibility_low = road_context.get("lane_visibility_low", True)
+        visibility_condition = road_context.visibility_condition
+        visibility_score = float(road_context.visibility_score or 0.0)
+        lane_visibility_low = road_context.lane_visibility_low
         speed_cap_kmh = VISIBILITY_SPEED_CAPS.get(visibility_condition)
 
-        decision["visibility_condition"] = visibility_condition
-        decision["visibility_score"] = round(visibility_score, 2)
-        decision["speed_cap_kmh"] = speed_cap_kmh
+        decision.visibility_condition = visibility_condition
+        decision.visibility_score = round(visibility_score, 2)
+        decision.speed_cap_kmh = speed_cap_kmh
 
         if visibility_condition == "day":
             return
@@ -430,34 +412,34 @@ class DecisionEngine:
     def make_decision(self, objects, road_context):
         decision = self._empty_decision()
 
-        lane_visibility_low = road_context.get("lane_visibility_low", True)
+        lane_visibility_low = road_context.lane_visibility_low
         self._apply_visibility_policy(decision, road_context)
         same_lane_vehicles = sorted(
             [
                 obj for obj in objects
-                if obj.get("class") in VEHICLE_CLASSES and obj.get("lane_index") == 0
+                if obj.label in VEHICLE_CLASSES and obj.lane_index == 0
             ],
-            key=lambda obj: obj.get("distance", 9999),
+            key=lambda obj: obj.distance,
         )
         same_path_vulnerable = sorted(
             [
                 obj for obj in objects
-                if obj.get("class") in PERSON_CLASSES and obj.get("path_conflict", False)
+                if obj.label in PERSON_CLASSES and obj.path_conflict
             ],
-            key=lambda obj: obj.get("distance", 9999),
+            key=lambda obj: obj.distance,
         )
         adjacent_vehicles = sorted(
             [
                 obj for obj in objects
-                if obj.get("class") in VEHICLE_CLASSES and obj.get("lane_index") != 0
+                if obj.label in VEHICLE_CLASSES and obj.lane_index != 0
             ],
-            key=lambda obj: obj.get("distance", 9999),
+            key=lambda obj: obj.distance,
         )
-        close_objects_count = sum(1 for obj in objects if obj.get("distance", 9999) <= 25)
-        stop_sign_detected = any(obj.get("class") == "stop sign" for obj in objects)
+        close_objects_count = sum(1 for obj in objects if obj.distance <= 25)
+        stop_sign_detected = any(obj.label == "stop sign" for obj in objects)
         traffic_lights = sorted(
-            [obj for obj in objects if obj.get("class") == "traffic light"],
-            key=lambda obj: obj.get("distance", 9999),
+            [obj for obj in objects if obj.label == "traffic light"],
+            key=lambda obj: obj.distance,
         )
 
         lead_vulnerable = same_path_vulnerable[0] if same_path_vulnerable else None
@@ -466,7 +448,7 @@ class DecisionEngine:
         primary_traffic_light = traffic_lights[0] if traffic_lights else None
 
         if lead_vulnerable is not None:
-            distance = lead_vulnerable.get("distance", 9999)
+            distance = lead_vulnerable.distance
             if distance <= 7.0:
                 consider_mode(
                     decision,
@@ -525,9 +507,9 @@ class DecisionEngine:
             )
 
         if primary_traffic_light is not None:
-            signal_state = primary_traffic_light.get("traffic_light_color", "unknown")
-            signal_distance = primary_traffic_light.get("distance", 9999)
-            decision["traffic_light_state"] = signal_state
+            signal_state = primary_traffic_light.traffic_light_color or "unknown"
+            signal_distance = primary_traffic_light.distance
+            decision.traffic_light_state = signal_state
 
             if signal_state == "red" and signal_distance <= 42.0:
                 consider_mode(
@@ -568,8 +550,8 @@ class DecisionEngine:
                 )
 
         if nearest_adjacent_vehicle is not None:
-            distance = nearest_adjacent_vehicle.get("distance", 9999)
-            lane_relation = nearest_adjacent_vehicle.get("lane_relation", "adjacent")
+            distance = nearest_adjacent_vehicle.distance
+            lane_relation = nearest_adjacent_vehicle.lane_relation or "adjacent"
 
             if distance <= 4.0:
                 consider_mode(
@@ -600,7 +582,7 @@ class DecisionEngine:
                 )
 
         if lane_visibility_low:
-            decision["lane"] = "keep_lane_with_caution"
+            decision.lane = "keep_lane_with_caution"
             consider_mode(
                 decision,
                 "reduced_throttle",
@@ -618,39 +600,38 @@ class DecisionEngine:
                 priority="speed",
             )
 
-        if not decision["reason"]:
-            decision["reason"].append("Road situation stable")
-            decision["action_priority"].append("maintain")
+        if not decision.reason:
+            decision.reason.append("Road situation stable")
+            decision.action_priority.append("maintain")
 
         self._update_estimated_speed(decision)
-        decision.pop("longitudinal_mode", None)
-        decision.pop("speed_cap_kmh", None)
         return decision
 
 
 def consider_mode(decision, mode, risk=None, reason=None, priority=None, focus_obj=None):
-    current_order = LONGITUDINAL_ORDER[decision["longitudinal_mode"]]
+    current_order = LONGITUDINAL_ORDER[decision.longitudinal_mode]
     new_order = LONGITUDINAL_ORDER[mode]
 
     if new_order > current_order:
-        decision["longitudinal_mode"] = mode
-        decision.update(LONGITUDINAL_PRESETS[mode])
+        decision.longitudinal_mode = mode
+        for key, value in LONGITUDINAL_PRESETS[mode].items():
+            setattr(decision, key, value)
 
     if risk is not None:
-        decision["risk"] = max_risk(decision["risk"], risk)
+        decision.risk = max_risk(decision.risk, risk)
 
-    if reason and reason not in decision["reason"]:
-        decision["reason"].append(reason)
+    if reason and reason not in decision.reason:
+        decision.reason.append(reason)
 
-    if priority and priority not in decision["action_priority"]:
-        decision["action_priority"].append(priority)
+    if priority and priority not in decision.action_priority:
+        decision.action_priority.append(priority)
 
-    if focus_obj is not None and (new_order > current_order or decision["focus_object_id"] is None):
-        decision["focus_object_id"] = focus_obj.get("id")
-        decision["focus_lane_relation"] = focus_obj.get("lane_relation")
-        decision["focus_distance_m"] = round(focus_obj.get("distance", 0.0), 2)
-        decision["focus_ttc_s"] = focus_obj.get("ttc_s")
-        decision["focus_relative_speed_mps"] = focus_obj.get("relative_speed_mps")
+    if focus_obj is not None and (new_order > current_order or decision.focus_object_id is None):
+        decision.focus_object_id = focus_obj.id
+        decision.focus_lane_relation = focus_obj.lane_relation
+        decision.focus_distance_m = round(focus_obj.distance, 2)
+        decision.focus_ttc_s = focus_obj.ttc_s
+        decision.focus_relative_speed_mps = focus_obj.relative_speed_mps
 
 
 def max_risk(current, new):

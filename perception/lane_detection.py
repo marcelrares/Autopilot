@@ -15,8 +15,39 @@ from config import (
     LANE_MIN_LINE_LENGTH,
     LANE_SIDE_MARGIN_RATIO,
     LANE_TOP_CUT_RATIO,
+    PERF_LANE_MAX_WIDTH,
 )
 from utils.visibility import build_lane_guidance
+
+
+def _resize_for_lane_processing(frame):
+    frame_h, frame_w = frame.shape[:2]
+    max_width = int(PERF_LANE_MAX_WIDTH)
+    if max_width <= 0 or frame_w <= max_width:
+        return frame, 1.0
+
+    scale = max_width / float(frame_w)
+    resized_w = max(1, int(frame_w * scale))
+    resized_h = max(1, int(frame_h * scale))
+    resized = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+    return resized, (frame_w / float(resized_w))
+
+
+def _rescale_lines(lines, scale_up):
+    if scale_up == 1.0:
+        return lines
+
+    scaled_lines = []
+    for line in lines:
+        scaled_line = np.rint(np.array(line, dtype=np.float32) * scale_up).astype(np.int32)
+        scaled_lines.append(scaled_line)
+    return scaled_lines
+
+
+def _rescale_polygon(polygon, scale_up):
+    if scale_up == 1.0:
+        return polygon
+    return np.rint(polygon.astype(np.float32) * scale_up).astype(np.int32)
 
 
 def _adaptive_canny_thresholds(guidance_gray, visibility_context=None):
@@ -55,13 +86,14 @@ def _adaptive_hough_params(visibility_context=None):
 
 
 def detect_lanes(frame, visibility_context=None):
-    height, width = frame.shape[:2]
+    processing_frame, scale_up = _resize_for_lane_processing(frame)
+    height, width = processing_frame.shape[:2]
 
     top_cut = int(height * LANE_TOP_CUT_RATIO)
     margin_x = int(width * LANE_SIDE_MARGIN_RATIO)
     margin_bottom = int(height * LANE_BOTTOM_MARGIN_RATIO)
 
-    mask = np.zeros_like(frame)
+    mask = np.zeros_like(processing_frame)
 
     polygon = np.array([[
         (margin_x, height - margin_bottom),
@@ -71,7 +103,7 @@ def detect_lanes(frame, visibility_context=None):
     ]], dtype=np.int32)
 
     cv2.fillPoly(mask, polygon, (255, 255, 255))
-    roi = cv2.bitwise_and(frame, mask)
+    roi = cv2.bitwise_and(processing_frame, mask)
 
     guidance_gray, lane_mask = build_lane_guidance(roi, visibility_context)
     canny_low, canny_high = _adaptive_canny_thresholds(guidance_gray, visibility_context)
@@ -112,4 +144,4 @@ def detect_lanes(frame, visibility_context=None):
     )
     filtered_lines = filtered_lines[:max_lines]
 
-    return filtered_lines, polygon
+    return _rescale_lines(filtered_lines, scale_up), _rescale_polygon(polygon, scale_up)

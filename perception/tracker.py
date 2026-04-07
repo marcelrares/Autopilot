@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 from config import (
@@ -9,14 +10,17 @@ from config import (
     TRACK_SEGMENT_IOU_THRESHOLD,
     VEHICLE_CLASSES,
 )
+from models import Detection, TrackedObject
 
 
 class ObjectTracker:
     def __init__(self):
-        self.tracker = DeepSort(max_age=30)
+        self.tracker = DeepSort(max_age=30, embedder_gpu=torch.cuda.is_available())
         self.prev_positions = {}
         self.prev_distances = {}
         self.prev_signal_states = {}
+        self.prev_polygons = {}
+        self.prev_labels = {}
 
     @staticmethod
     def clamp_bbox(box, frame_w, frame_h):
@@ -27,7 +31,7 @@ class ObjectTracker:
         r = int(np.clip(r, l + 1, frame_w))
         b = int(np.clip(b, t + 1, frame_h))
 
-        return [l, t, r, b]
+        return (l, t, r, b)
 
     @staticmethod
     def bbox_center(box):
@@ -88,13 +92,13 @@ class ObjectTracker:
 
         return inter_area / union_area
 
-    def match_segmented_object(self, track_bbox, segmented_objects, preferred_class=None):
-        candidates = segmented_objects
+    def match_detection(self, track_bbox, detections, preferred_label=None):
+        candidates = detections
 
-        if preferred_class is not None:
+        if preferred_label is not None:
             same_class_candidates = [
-                seg_obj for seg_obj in segmented_objects
-                if seg_obj["class"] == preferred_class
+                detection for detection in detections
+                if detection.label == preferred_label
             ]
             if same_class_candidates:
                 candidates = same_class_candidates
@@ -104,13 +108,13 @@ class ObjectTracker:
         best_center_distance = float("inf")
         track_cx, track_cy = self.bbox_center(track_bbox)
 
-        for seg_obj in candidates:
-            iou = self.compute_iou(track_bbox, seg_obj["bbox"])
-            seg_cx, seg_cy = self.bbox_center(seg_obj["bbox"])
+        for detection in candidates:
+            iou = self.compute_iou(track_bbox, detection.bbox)
+            seg_cx, seg_cy = self.bbox_center(detection.bbox)
             center_distance = float(np.hypot(track_cx - seg_cx, track_cy - seg_cy))
 
             if iou > best_iou or (np.isclose(iou, best_iou) and center_distance < best_center_distance):
-                best_match = seg_obj
+                best_match = detection
                 best_iou = iou
                 best_center_distance = center_distance
 
@@ -139,32 +143,39 @@ class ObjectTracker:
         self.prev_distances[track_id] = smoothed_distance
         return smoothed_distance
 
-    def update(self, detections, frame, segmented_objects, dt=1.0 / 30.0):
-        tracks = self.tracker.update_tracks(detections, frame=frame)
+    def update(self, detections, frame, dt=1.0 / 30.0, max_prediction_age=0):
+        track_inputs = [detection.to_deepsort_input() for detection in detections]
+        tracks = self.tracker.update_tracks(track_inputs, frame=frame)
         objects = []
         frame_h, frame_w = frame.shape[:2]
         active_track_ids = set()
 
         for track in tracks:
-            if not track.is_confirmed() or track.time_since_update > 0:
+            if not track.is_confirmed() or track.time_since_update > max_prediction_age:
                 continue
 
             track_id = track.track_id
             active_track_ids.add(track_id)
             track_bbox = self.clamp_bbox(list(map(int, track.to_ltrb())), frame_w, frame_h)
-            track_class = track.det_class if track.det_class is not None else "object"
+            track_class = (
+                track.det_class
+                if track.det_class is not None else self.prev_labels.get(track_id, "object")
+            )
 
-            matched_obj = self.match_segmented_object(track_bbox, segmented_objects, track_class)
+            matched_detection = self.match_detection(track_bbox, detections, track_class)
 
-            if matched_obj is not None:
-                output_bbox = self.clamp_bbox(matched_obj["bbox"], frame_w, frame_h)
-                matched_class = matched_obj["class"]
-                matched_polygon = matched_obj["polygon"]
-                traffic_light_color = matched_obj.get("traffic_light_color")
+            if matched_detection is not None:
+                output_bbox = self.clamp_bbox(matched_detection.bbox, frame_w, frame_h)
+                matched_class = matched_detection.label
+                matched_polygon = matched_detection.polygon
+                traffic_light_color = matched_detection.traffic_light_color
+                if matched_polygon is not None:
+                    self.prev_polygons[track_id] = matched_polygon
+                self.prev_labels[track_id] = matched_class
             else:
                 output_bbox = track_bbox
                 matched_class = track_class
-                matched_polygon = None
+                matched_polygon = self.prev_polygons.get(track_id)
                 traffic_light_color = None
 
             cx, cy = map(int, self.bbox_center(output_bbox))
@@ -184,20 +195,24 @@ class ObjectTracker:
             else:
                 traffic_light_color = None
 
-            objects.append({
-                "id": track_id,
-                "bbox": output_bbox,
-                "class": matched_class,
-                "speed": speed,
-                "distance": distance,
-                "polygon": matched_polygon,
-                "traffic_light_color": traffic_light_color,
-            })
+            objects.append(
+                TrackedObject(
+                    id=track_id,
+                    bbox=output_bbox,
+                    label=matched_class,
+                    speed=speed,
+                    distance=distance,
+                    polygon=matched_polygon,
+                    traffic_light_color=traffic_light_color,
+                )
+            )
 
         stale_track_ids = set(self.prev_positions) - active_track_ids
         for stale_track_id in stale_track_ids:
             self.prev_positions.pop(stale_track_id, None)
             self.prev_distances.pop(stale_track_id, None)
             self.prev_signal_states.pop(stale_track_id, None)
+            self.prev_polygons.pop(stale_track_id, None)
+            self.prev_labels.pop(stale_track_id, None)
 
         return objects
